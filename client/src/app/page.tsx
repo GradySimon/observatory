@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useDuckDBStore } from "./store";
+import GridMap from "@/components/grid-map/GridMap";
 
 const EOS = new Uint8Array([255, 255, 255, 255, 0, 0, 0, 0]);
 
@@ -42,6 +43,9 @@ export default function Home() {
             )
           : result}
       </pre>
+      <div style={{ marginTop: 16 }}>
+        <GridMap />
+      </div>
     </div>
   );
 }

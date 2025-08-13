@@ -1,13 +1,12 @@
 import { create } from "zustand";
 import { initDuckDB } from "@/lib/duckdb";
 import { makeFakeArrowTable } from "@/lib/data";
-
-type Conn = any;
+import { AsyncDuckDBConnection } from "@duckdb/duckdb-wasm";
 
 interface DuckDBState {
   status: "idle" | "starting" | "ready" | "error";
   error: string | null;
-  conn: Conn | null;
+  conn: AsyncDuckDBConnection | null;
   start: () => Promise<void>;
   stop: () => Promise<void>;
   lastResult: unknown | null;
