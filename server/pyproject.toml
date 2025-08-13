@@ -8,6 +8,11 @@ dependencies = [
     "uvicorn[standard]>=0.24.0",
     "pydantic>=2.5.0",
     "python-multipart>=0.0.6",
+    "polars>=0.20.0",
+    "zstandard>=0.22.0",
+    "tqdm>=4.65.0",
+    "torrentp>=0.2.4",
+    "pyarrow>=14.0.0",
 ]
 
 [project.optional-dependencies]

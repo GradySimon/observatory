@@ -1,0 +1,624 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["rich", "polars", "zstandard", "tqdm", "pyarrow"]
+# ///
+
+"""
+Download and process Reddit Election Night 2024 data using transmission-cli.
+
+This script downloads the Reddit comments dataset for November 2024 using
+transmission-cli torrent client, then processes it into optimized parquet files
+for fast serving. The data will be saved to ~/reddit-dumps/.
+
+Processing will stop after reaching 1 million comments to limit file size and
+processing time while still providing a substantial dataset for analysis.
+
+Usage:
+    ./download_reddit_data [--force] [--output-dir PATH] [--skip-processing]
+
+Options:
+    --force           Re-download even if file exists
+    --output-dir      Custom output directory (default: ~/reddit-dumps)
+    --skip-processing Skip the data processing phase
+    --process-only    Only run data processing (skip download)
+"""
+
+import argparse
+import os
+import pathlib
+import subprocess
+import sys
+import time
+import urllib.parse
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
+from rich.panel import Panel
+from rich.text import Text
+import json
+import zstandard as zstd
+import polars as pl
+from tqdm import tqdm
+
+console = Console()
+
+# Configuration - Use the bundled torrent file
+SCRIPT_DIR = pathlib.Path(__file__).parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+TORRENT_FILE = PROJECT_ROOT / "data" / "reddit-2024-11.torrent"
+
+# Alternative: Academic Torrents URL for Reddit data
+ACADEMIC_TORRENTS_URL = "https://academictorrents.com/details/7c0645c94321311bb05bd879445e4c198b5925d8"
+EXPECTED_FILE = "reddit/comments/RC_2024-11.zst"
+DEFAULT_OUTPUT_DIR = pathlib.Path("~/reddit-dumps").expanduser()
+
+def check_transmission_cli():
+    """Check if transmission-cli is available."""
+    try:
+        result = subprocess.run(
+            ["transmission-cli", "--help"], 
+            capture_output=True, 
+            text=True
+        )
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
+
+def check_aria2c():
+    """Check if aria2c is available."""
+    try:
+        result = subprocess.run(
+            ["aria2c", "--version"], 
+            capture_output=True, 
+            text=True
+        )
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
+
+def install_transmission_cli():
+    """Provide instructions for installing transmission-cli."""
+    console.print(Panel.fit(
+        "[bold red]transmission-cli not found![/bold red]\n\n"
+        "Please install transmission-cli:\n\n"
+        "[bold]macOS:[/bold]\n"
+        "  brew install transmission\n\n"
+        "[bold]Ubuntu/Debian:[/bold]\n"
+        "  sudo apt update && sudo apt install transmission-cli\n\n"
+        "[bold]Other systems:[/bold]\n"
+        "  Check your package manager for 'transmission-cli'"
+    ))
+
+def download_torrent(magnet_url: str, output_dir: pathlib.Path):
+    """Download torrent using transmission-cli."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    console.print(f"[bold green]Starting torrent download...[/bold green]")
+    console.print(f"Output directory: {output_dir}")
+    console.print(f"Expected file: {output_dir / EXPECTED_FILE}")
+    
+    cmd = [
+        "transmission-cli",
+        magnet_url,
+        "-w", str(output_dir),
+        "-f", str(output_dir / "transmission.log")
+    ]
+    
+    console.print(f"\n[dim]Running: {' '.join(cmd[:2])} ... -w {output_dir}[/dim]\n")
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TimeElapsedColumn(),
+        console=console
+    ) as progress:
+        
+        task = progress.add_task("Downloading Reddit data...", total=100)
+        
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            while True:
+                output = process.stdout.readline()
+                if output == '' and process.poll() is not None:
+                    break
+                if output:
+                    # Parse progress from transmission-cli output
+                    if "%" in output:
+                        try:
+                            # Look for percentage in output
+                            for part in output.split():
+                                if "%" in part:
+                                    percent = float(part.replace("%", ""))
+                                    progress.update(task, completed=percent)
+                                    break
+                        except (ValueError, IndexError):
+                            pass
+                    console.print(f"[dim]{output.strip()}[/dim]")
+            
+            return_code = process.poll()
+            if return_code == 0:
+                progress.update(task, completed=100)
+                console.print(f"\n[bold green]✓ Download completed successfully![/bold green]")
+                return True
+            else:
+                console.print(f"\n[bold red]✗ Download failed with exit code {return_code}[/bold red]")
+                return False
+                
+        except KeyboardInterrupt:
+            console.print(f"\n[yellow]Download interrupted by user[/yellow]")
+            process.terminate()
+            return False
+        except Exception as e:
+            console.print(f"\n[bold red]Error during download: {e}[/bold red]")
+            return False
+
+def download_with_aria2c(magnet_url: str, output_dir: pathlib.Path):
+    """Download torrent using aria2c."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    console.print(f"[bold green]Starting aria2c download...[/bold green]")
+    console.print(f"Output directory: {output_dir}")
+    
+    cmd = [
+        "aria2c",
+        magnet_url,
+        "-d", str(output_dir),
+        "--bt-max-peers=50",
+        "--bt-request-peer-speed-limit=200K",
+        "--max-connection-per-server=4",
+        "--seed-time=0"  # Don't seed after download
+    ]
+    
+    console.print(f"\n[dim]Running aria2c...[/dim]\n")
+    
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+        
+        while True:
+            output = process.stdout.readline()
+            if output == '' and process.poll() is not None:
+                break
+            if output:
+                console.print(f"[dim]{output.strip()}[/dim]")
+        
+        return_code = process.poll()
+        if return_code == 0:
+            console.print(f"\n[bold green]✓ aria2c download completed![/bold green]")
+            return True
+        else:
+            console.print(f"\n[bold red]✗ aria2c failed with exit code {return_code}[/bold red]")
+            return False
+            
+    except KeyboardInterrupt:
+        console.print(f"\n[yellow]Download interrupted by user[/yellow]")
+        process.terminate()
+        return False
+    except Exception as e:
+        console.print(f"\n[bold red]Error during aria2c download: {e}[/bold red]")
+        return False
+
+def stream_jsonlines(zst_path: pathlib.Path):
+    """Stream JSON lines from zst file."""
+    dctx = zstd.ZstdDecompressor(max_window_size=2**31)
+    with open(zst_path, "rb") as fh:
+        with dctx.stream_reader(fh) as reader:
+            import io
+            text_stream = io.TextIOWrapper(reader, encoding='utf-8')
+            try:
+                for line in text_stream:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    yield json.loads(line)
+            except Exception as e:
+                console.print(f"[red]Error reading stream: {e}[/red]")
+                raise
+
+def is_election_night_comment(obj: dict) -> bool:
+    """Filter for election-night top-level comments."""
+    # Only top-level comments (replies to posts, not other comments)
+    if obj.get('parent_id', '').startswith('t3_'):
+        created_utc = obj.get('created_utc', 0)
+        # Election Day (Nov 5, 2024 00:00 UTC) to 3am ET Nov 6 (08:00 UTC)
+        election_start = 1730764800  # Nov 5, 2024 00:00 UTC
+        election_end = 1730880000    # Nov 6, 2024 08:00 UTC (3am ET)
+        
+        # All top-level comments in this time range, no other filtering
+        return election_start <= created_utc <= election_end
+    
+    return False
+
+def process_reddit_data(zst_path: pathlib.Path, output_dir: pathlib.Path, max_comments: int = 1_000_000):
+    """Process the raw Reddit data into optimized parquet files."""
+    console.print(Panel.fit(
+        "[bold blue]🔄 Processing Reddit Data[/bold blue]\n"
+        "Converting raw zst file to optimized parquet files...\n"
+        "This will create pre-filtered, indexed data for fast serving.",
+        title="Data Processing"
+    ))
+    
+    # Create processed data directory
+    processed_dir = output_dir / "processed"
+    processed_dir.mkdir(exist_ok=True)
+    
+    # Output files
+    election_comments_file = processed_dir / "election_comments.parquet"
+    subreddit_stats_file = processed_dir / "subreddit_stats.parquet"
+    metadata_file = processed_dir / "metadata.json"
+    
+    console.print(f"📁 Input file: {zst_path}")
+    console.print(f"📁 Output directory: {processed_dir}")
+    console.print(f"🎯 Filter: Election night comments (Nov 5-6, 2024)")
+    console.print(f"🔢 Max comments: {max_comments:,}")
+    
+    # Process data with progress tracking
+    start_time = time.time()
+    processed_count = 0
+    matched_count = 0
+    election_comments = []
+    subreddit_counts = {}
+    
+    console.print("\n🚀 Starting data processing...")
+    
+    try:
+        # Estimate total records for progress tracking
+        file_size = zst_path.stat().st_size
+        estimated_total = int(file_size * 8 / 1800)  # Rough estimate: 8x compression, ~1800 bytes per record
+        
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(bar_width=40),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TextColumn("• {task.fields[processed]:,} processed • {task.fields[matched]:,} matched"),
+            TimeElapsedColumn(),
+            console=console
+        ) as progress:
+            
+            task = progress.add_task(
+                "Processing Reddit comments...", 
+                total=estimated_total,
+                processed=0,
+                matched=0
+            )
+            
+            for obj in stream_jsonlines(zst_path):
+                processed_count += 1
+                
+                if is_election_night_comment(obj):
+                    matched_count += 1
+                    
+                    # Extract relevant fields
+                    comment_data = {
+                        'id': obj.get('id', ''),
+                        'author': obj.get('author', ''),
+                        'created_utc': obj.get('created_utc', 0),
+                        'subreddit': obj.get('subreddit', ''),
+                        'parent_id': obj.get('parent_id', ''),
+                        'link_id': obj.get('link_id', ''),
+                        'score': obj.get('score', 0),
+                        'body': obj.get('body', '')[:2000],  # Truncate very long bodies
+                    }
+                    election_comments.append(comment_data)
+                    
+                    # Track subreddit stats
+                    subreddit = comment_data['subreddit']
+                    if subreddit:
+                        subreddit_counts[subreddit] = subreddit_counts.get(subreddit, 0) + 1
+                
+                # Update progress every 10k comments
+                if processed_count % 10000 == 0:
+                    progress.update(
+                        task, 
+                        completed=processed_count,
+                        processed=processed_count,
+                        matched=matched_count
+                    )
+                    
+                # Check if we've reached comment limit
+                if matched_count >= max_comments:
+                    console.print(f"🎯 Reached {max_comments:,} comment limit ({matched_count:,} comments). Stopping processing...")
+                    break
+                    
+                # Save in batches to avoid memory issues
+                if len(election_comments) >= 100000:
+                    df_batch = pl.DataFrame(election_comments)
+                    if election_comments_file.exists():
+                        # Append to existing file
+                        existing_df = pl.read_parquet(election_comments_file)
+                        combined_df = pl.concat([existing_df, df_batch])
+                        combined_df.write_parquet(election_comments_file)
+                    else:
+                        # Create new file
+                        df_batch.write_parquet(election_comments_file)
+                    
+                    console.print(f"💾 Saved batch: {len(election_comments):,} comments (Total: {matched_count:,})")
+                    election_comments = []  # Clear batch
+                    
+                    # Also check limit after saving batch
+                    if matched_count >= max_comments:
+                        console.print(f"🎯 Reached {max_comments:,} comment limit after batch save. Stopping processing...")
+                        break
+            
+            # Final progress update
+            progress.update(
+                task,
+                processed=processed_count,
+                matched=matched_count
+            )
+    
+    except Exception as e:
+        console.print(f"[bold red]❌ Error during processing: {e}[/bold red]")
+        return False
+    
+    # Save final batch if any
+    if election_comments:
+        df_batch = pl.DataFrame(election_comments)
+        if election_comments_file.exists():
+            existing_df = pl.read_parquet(election_comments_file)
+            combined_df = pl.concat([existing_df, df_batch])
+            combined_df.write_parquet(election_comments_file)
+        else:
+            df_batch.write_parquet(election_comments_file)
+    
+    # Create subreddit stats
+    if subreddit_counts:
+        subreddit_df = pl.DataFrame([
+            {"subreddit": sub, "comment_count": count}
+            for sub, count in sorted(subreddit_counts.items(), key=lambda x: x[1], reverse=True)
+        ])
+        subreddit_df.write_parquet(subreddit_stats_file)
+    
+    # Save metadata
+    elapsed_time = time.time() - start_time
+    metadata = {
+        "processed_at": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+        "source_file": str(zst_path),
+        "total_processed": processed_count,
+        "election_comments": matched_count,
+        "processing_time_seconds": elapsed_time,
+        "processing_rate_per_second": processed_count / elapsed_time if elapsed_time > 0 else 0,
+        "unique_subreddits": len(subreddit_counts),
+        "max_comments_limit": max_comments,
+        "hit_comment_limit": matched_count >= max_comments,
+        "processing_stopped_early": matched_count >= max_comments,
+        "output_files": {
+            "election_comments": str(election_comments_file),
+            "subreddit_stats": str(subreddit_stats_file)
+        }
+    }
+    
+    with open(metadata_file, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    
+    # Display results
+    status_text = "Complete" if matched_count < max_comments else f"Stopped at {max_comments:,} limit"
+    console.print(Panel.fit(
+        f"[bold green]✅ Processing {status_text}![/bold green]\n\n"
+        f"📊 Total processed: {processed_count:,} comments\n"
+        f"🎯 Election comments: {matched_count:,} comments{' (LIMITED)' if matched_count >= max_comments else ''}\n"
+        f"🏷️  Unique subreddits: {len(subreddit_counts):,}\n"
+        f"⏱️  Processing time: {elapsed_time:.1f} seconds\n"
+        f"⚡ Rate: {processed_count/elapsed_time:.0f} comments/sec\n\n"
+        f"📁 Output files:\n"
+        f"   • {election_comments_file.name}\n"
+        f"   • {subreddit_stats_file.name}\n"
+        f"   • {metadata_file.name}",
+        title="Processing Results"
+    ))
+    
+    return True
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Download Reddit Election Night 2024 data",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__
+    )
+    parser.add_argument(
+        "--force", 
+        action="store_true", 
+        help="Re-download even if file exists"
+    )
+    parser.add_argument(
+        "--output-dir", 
+        type=pathlib.Path, 
+        default=DEFAULT_OUTPUT_DIR,
+        help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})"
+    )
+    parser.add_argument(
+        "--magnet-url",
+        type=str,
+        help="Magnet URL for the torrent (required if not set in script)"
+    )
+    parser.add_argument(
+        "--torrent-file",
+        type=pathlib.Path,
+        help="Path to .torrent file (alternative to magnet URL)"
+    )
+    parser.add_argument(
+        "--skip-processing",
+        action="store_true",
+        help="Skip the data processing phase after download"
+    )
+    parser.add_argument(
+        "--process-only",
+        action="store_true",
+        help="Only run data processing (skip download)"
+    )
+    parser.add_argument(
+        "--max-comments",
+        type=int,
+        default=1_000_000,
+        help="Maximum number of comments to process (default: 1,000,000)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Display header
+    header_text = "[bold blue]Reddit Election Night 2024 Data Downloader[/bold blue]\n"
+    if args.process_only:
+        header_text += f"Processing existing Reddit data into optimized parquet files (limited to {args.max_comments:,} comments)"
+    elif args.skip_processing:
+        header_text += "This will download ~35GB of Reddit comments from November 2024"
+    else:
+        header_text += f"This will download ~35GB of Reddit comments and process them (limited to {args.max_comments:,} comments)"
+    
+    console.print(Panel.fit(header_text, title="Observatory Project"))
+    
+    # For process-only mode, skip download checks
+    if not args.process_only:
+        # Check if transmission-cli is available
+        if not check_transmission_cli():
+            install_transmission_cli()
+            sys.exit(1)
+    
+    # Get torrent source (use bundled .torrent file by default)
+    if args.torrent_file:
+        if not args.torrent_file.exists():
+            console.print(f"[bold red]Torrent file not found: {args.torrent_file}[/bold red]")
+            sys.exit(1)
+        torrent_source = str(args.torrent_file)
+        console.print(f"Using custom torrent file: {args.torrent_file}")
+    elif TORRENT_FILE.exists():
+        torrent_source = str(TORRENT_FILE)
+        console.print(f"Using bundled torrent file: {TORRENT_FILE}")
+    else:
+        magnet_url = args.magnet_url
+        if not magnet_url:
+            console.print(Panel.fit(
+                "[bold red]No torrent source available![/bold red]\n\n"
+                f"Bundled torrent file not found: {TORRENT_FILE}\n\n"
+                "You need to provide either:\n"
+                "1. --magnet-url 'MAGNET_URL', or\n"
+                "2. --torrent-file /path/to/file.torrent\n\n"
+                f"Academic Torrents URL: {ACADEMIC_TORRENTS_URL}"
+            ))
+            sys.exit(1)
+        torrent_source = magnet_url
+    
+    # Handle URL-encoded magnet links (skip if using .torrent file)
+    if not torrent_source.endswith('.torrent') and torrent_source.startswith("magnet:"):
+        # Try to handle the %EF%BF%BD characters - they represent invalid UTF-8 bytes
+        if "%EF%BF%BD" in torrent_source:
+            console.print("[yellow]Warning: Magnet URL contains replacement characters.[/yellow]")
+            console.print("This is the actual URL from Academic Torrents, attempting to use it anyway...")
+            console.print(f"[dim]URL: {torrent_source[:100]}...[/dim]")
+            
+            # Try using aria2c instead of transmission-cli for better handling
+            console.print("\n[bold]Trying aria2c instead of transmission-cli...[/bold]")
+            if not check_aria2c():
+                console.print(Panel.fit(
+                    "[bold red]aria2c not found![/bold red]\n\n"
+                    "aria2c handles problematic magnet URLs better than transmission-cli.\n\n"
+                    "[bold]Install aria2c:[/bold]\n"
+                    "macOS: brew install aria2\n"
+                    "Ubuntu: sudo apt install aria2\n\n"
+                    "Then try again."
+                ))
+                sys.exit(1)
+            
+            # Use aria2c instead
+            success = download_with_aria2c(torrent_source, args.output_dir)
+            if success and (args.output_dir / EXPECTED_FILE).exists():
+                console.print("[bold green]✓ Download completed with aria2c![/bold green]")
+                sys.exit(0)
+            else:
+                console.print("[red]aria2c download failed, falling back to sample data[/red]")
+                sys.exit(1)
+    
+    # Check if file already exists (but not in process-only mode)
+    expected_file_path = args.output_dir / EXPECTED_FILE
+    if expected_file_path.exists() and not args.force and not args.process_only:
+        console.print(f"[yellow]File already exists: {expected_file_path}[/yellow]")
+        console.print("Use --force to re-download or --process-only to just process the data")
+        
+        # Show file info
+        file_size = expected_file_path.stat().st_size
+        file_size_gb = file_size / (1024**3)
+        console.print(f"Existing file size: {file_size_gb:.2f} GB")
+        sys.exit(0)
+    
+    # Handle different modes
+    expected_file_path = args.output_dir / EXPECTED_FILE
+    download_success = True
+    
+    if args.process_only:
+        # Process-only mode: check if raw data exists
+        if not expected_file_path.exists():
+            console.print(f"[bold red]Raw data file not found: {expected_file_path}[/bold red]")
+            console.print("Please run the download first without --process-only")
+            sys.exit(1)
+        download_success = True
+    else:
+        # Download mode (with or without processing)
+        console.print(f"\n[bold]Starting download...[/bold]")
+        download_success = download_torrent(torrent_source, args.output_dir)
+        
+        if download_success:
+            if expected_file_path.exists():
+                file_size = expected_file_path.stat().st_size
+                file_size_gb = file_size / (1024**3)
+                console.print(Panel.fit(
+                    f"[bold green]✓ Download Success![/bold green]\n\n"
+                    f"File: {expected_file_path}\n"
+                    f"Size: {file_size_gb:.2f} GB",
+                    title="Download Complete"
+                ))
+            else:
+                console.print(f"[yellow]Download completed but expected file not found at: {expected_file_path}[/yellow]")
+                console.print("Check the download directory for the actual file location.")
+                download_success = False
+        else:
+            console.print(f"[bold red]Download failed. Please check the error messages above.[/bold red]")
+            sys.exit(1)
+    
+    # Data processing phase
+    if download_success and expected_file_path.exists() and not args.skip_processing:
+        console.print(f"\n⏸️  [dim]Pausing 2 seconds before processing...[/dim]")
+        time.sleep(2)
+        
+        processing_success = process_reddit_data(expected_file_path, args.output_dir, args.max_comments)
+        
+        if processing_success:
+            console.print(Panel.fit(
+                f"[bold green]🎉 Complete Success![/bold green]\n\n"
+                f"✅ Downloaded: {expected_file_path.name}\n"
+                f"✅ Processed: optimized parquet files created (up to {args.max_comments:,} comments)\n\n"
+                f"🚀 The Observatory server will now load data instantly\n"
+                f"   from the pre-processed parquet files!",
+                title="All Done!"
+            ))
+        else:
+            console.print(f"[yellow]Download succeeded but processing failed.[/yellow]")
+            console.print(f"You can retry processing with: --process-only")
+            sys.exit(1)
+    elif args.skip_processing:
+        console.print(Panel.fit(
+            f"[bold green]✓ Download Complete![/bold green]\n\n"
+            f"File: {expected_file_path}\n\n"
+            f"⚠️  Processing skipped. The server will process data on first request.\n"
+            f"For faster startup, run: ./download_reddit_data --process-only",
+            title="Download Complete"
+        ))
+
+if __name__ == "__main__":
+    main()

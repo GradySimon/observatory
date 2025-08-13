@@ -1,26 +1,190 @@
 @import "tailwindcss";
 
+/* Bloomberg Terminal Inspired Color Scheme */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Light mode - Tufte-inspired minimal */
+  --terminal-bg: #ffffff;
+  --terminal-surface: #fafafa;
+  --terminal-border: #e5e5e5;
+  --terminal-hover: #f5f5f5;
+  
+  --terminal-text-primary: #1a1a1a;
+  --terminal-text-secondary: #525252;
+  --terminal-text-muted: #737373;
+  --terminal-text-inverse: #ffffff;
+  
+  /* Data colors - Bloomberg inspired */
+  --terminal-accent: #0066cc;
+  --terminal-accent-hover: #0052a3;
+  --terminal-success: #16a34a;
+  --terminal-warning: #d97706;
+  --terminal-error: #dc2626;
+  --terminal-info: #0ea5e9;
+  
+  /* Chart colors */
+  --terminal-chart-1: #0066cc;
+  --terminal-chart-2: #16a34a;
+  --terminal-chart-3: #d97706;
+  --terminal-chart-4: #dc2626;
+  --terminal-chart-5: #7c3aed;
+  --terminal-chart-6: #0891b2;
+}
+
+[data-theme="dark"] {
+  /* Dark mode - Bloomberg terminal inspired */
+  --terminal-bg: #000000;
+  --terminal-surface: #0a0a0a;
+  --terminal-border: #1a1a1a;
+  --terminal-hover: #171717;
+  
+  --terminal-text-primary: #fafafa;
+  --terminal-text-secondary: #a3a3a3;
+  --terminal-text-muted: #737373;
+  --terminal-text-inverse: #000000;
+  
+  /* Bloomberg orange/amber accents for dark mode */
+  --terminal-accent: #ff8c00;
+  --terminal-accent-hover: #ff7700;
+  --terminal-success: #10b981;
+  --terminal-warning: #f59e0b;
+  --terminal-error: #ef4444;
+  --terminal-info: #06b6d4;
+  
+  /* Chart colors - darker theme */
+  --terminal-chart-1: #ff8c00;
+  --terminal-chart-2: #10b981;
+  --terminal-chart-3: #f59e0b;
+  --terminal-chart-4: #ef4444;
+  --terminal-chart-5: #8b5cf6;
+  --terminal-chart-6: #06b6d4;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  /* Terminal color system */
+  --color-terminal-bg: var(--terminal-bg);
+  --color-terminal-surface: var(--terminal-surface);
+  --color-terminal-border: var(--terminal-border);
+  --color-terminal-hover: var(--terminal-hover);
+  
+  --color-terminal-text-primary: var(--terminal-text-primary);
+  --color-terminal-text-secondary: var(--terminal-text-secondary);
+  --color-terminal-text-muted: var(--terminal-text-muted);
+  --color-terminal-text-inverse: var(--terminal-text-inverse);
+  
+  --color-terminal-accent: var(--terminal-accent);
+  --color-terminal-accent-hover: var(--terminal-accent-hover);
+  --color-terminal-success: var(--terminal-success);
+  --color-terminal-warning: var(--terminal-warning);
+  --color-terminal-error: var(--terminal-error);
+  --color-terminal-info: var(--terminal-info);
+  
+  --color-terminal-chart-1: var(--terminal-chart-1);
+  --color-terminal-chart-2: var(--terminal-chart-2);
+  --color-terminal-chart-3: var(--terminal-chart-3);
+  --color-terminal-chart-4: var(--terminal-chart-4);
+  --color-terminal-chart-5: var(--terminal-chart-5);
+  --color-terminal-chart-6: var(--terminal-chart-6);
+  
+  /* Typography - Tufte inspired */
+  --font-mono: ui-monospace, 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
+  --font-sans: ui-sans-serif, -apple-system, 'Segoe UI', 'Roboto', sans-serif;
+  
+  /* Spacing - data dense */
+  --spacing-unit: 0.25rem;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--terminal-bg);
+  color: var(--terminal-text-primary);
+  font-family: var(--font-sans);
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Typography scale - Tufte inspired */
+.text-terminal {
+  color: var(--terminal-text-primary);
+}
+
+.text-terminal-secondary {
+  color: var(--terminal-text-secondary);
+}
+
+.text-terminal-muted {
+  color: var(--terminal-text-muted);
+}
+
+/* Data table styling */
+.data-table {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.025em;
+}
+
+/* Minimal borders - Tufte style */
+.terminal-border {
+  border-color: var(--terminal-border);
+}
+
+.terminal-border-t {
+  border-top: 1px solid var(--terminal-border);
+}
+
+.terminal-border-r {
+  border-right: 1px solid var(--terminal-border);
+}
+
+.terminal-border-b {
+  border-bottom: 1px solid var(--terminal-border);
+}
+
+.terminal-border-l {
+  border-left: 1px solid var(--terminal-border);
+}
+
+/* High density layouts */
+.compact {
+  line-height: 1.2;
+}
+
+.ultra-compact {
+  line-height: 1.1;
+}
+
+/* Bloomberg-style status indicators */
+.status-up {
+  color: var(--terminal-success);
+}
+
+.status-down {
+  color: var(--terminal-error);
+}
+
+.status-neutral {
+  color: var(--terminal-text-secondary);
+}
+
+/* Selection colors */
+::selection {
+  background-color: var(--terminal-accent);
+  color: var(--terminal-text-inverse);
+}
+
+/* Scrollbar styling for terminal feel */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--terminal-surface);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--terminal-border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--terminal-text-muted);
 }

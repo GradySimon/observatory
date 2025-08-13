@@ -1,16 +1,46 @@
-import ItemList from '@/components/ItemList'
+"use client";
+
+import { useEffect, useState } from "react";
+import { initDuckDB } from "@/lib/duckdb";
+import { makeFakeArrowTable } from "@/lib/data";
+
+const EOS = new Uint8Array([255, 255, 255, 255, 0, 0, 0, 0]);
 
 export default function Home() {
+  const [result, setResult] = useState<string>("initializing…");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        setResult("starting duckdb…");
+        const { conn } = await initDuckDB();
+        const tbl = makeFakeArrowTable();
+        console.log(`tbl: ${tbl}`);
+        await conn.insertArrowTable(tbl, { name: "arrow_table" });
+        await conn.insertArrowTable(EOS, { name: "arrow_table" });
+        const res = await conn.query("SELECT * FROM arrow_table LIMIT 1");
+        const row = res.toArray();
+        setResult(JSON.stringify(row));
+      } catch (e) {
+        setResult(String(e));
+      }
+    })();
+  }, []);
+
   return (
-    <div className="min-h-screen bg-gray-50">
-      <header className="bg-white shadow">
-        <div className="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
-          <h1 className="text-3xl font-bold text-gray-900">Observatory</h1>
-        </div>
-      </header>
-      <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
-        <ItemList />
-      </main>
+    <div style={{ padding: 16, fontFamily: "system-ui, sans-serif" }}>
+      <h1>DuckDB-WASM minimal test</h1>
+      <pre
+        style={{
+          whiteSpace: "pre-wrap",
+          background: "#f6f8fa",
+          padding: 12,
+          borderRadius: 6,
+          border: "1px solid #eaecef",
+        }}
+      >
+        {result}
+      </pre>
     </div>
-  )
+  );
 }
